@@ -1,21 +1,25 @@
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-import uvicorn
+from fastapi import FastAPI
+from pydantic import BaseModel
+from typing import List
 
 app = FastAPI()
-clients = []
 
-@app.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket):
-    await websocket.accept()
-    clients.append(websocket)
-    try:
-        while True:
-            data = await websocket.receive_text()
-            for client in clients:
-                if client != websocket:
-                    await client.send_text(data)
-    except WebSocketDisconnect:
-        clients.remove(websocket)
+# Сообщения будут храниться прямо в памяти (пока без базы)
+messages = []
 
-if __name__ == "__main__":
-    uvicorn.run("server:app", host="0.0.0.0", port=8000, reload=True)
+class Message(BaseModel):
+    username: str
+    text: str
+
+@app.get("/")
+def home():
+    return {"status": "ok", "msg": "Добро пожаловать в Cynosure Chat 🚀"}
+
+@app.get("/messages")
+def get_messages():
+    return messages
+
+@app.post("/send")
+def send_message(msg: Message):
+    messages.append(msg.dict())
+    return {"status": "ok", "msg": "sent"}
