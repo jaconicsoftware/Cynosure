@@ -1,54 +1,80 @@
-from fastapi import FastAPI, Depends, HTTPException
-from sqlalchemy.orm import Session
-import uvicorn
+import os
+import traceback
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel
+from sqlalchemy import create_engine, Column, Integer, String
+from sqlalchemy.orm import sessionmaker, declarative_base
 
-from database import SessionLocal, init_db
-from models import User
+# Настройка БД
+DATABASE_URL = os.getenv("DATABASE_URL")
+if DATABASE_URL is None:
+    raise RuntimeError("❌ DATABASE_URL не задан")
 
+engine = create_engine(DATABASE_URL)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
+
+# Таблица пользователей
+class User(Base):
+    __tablename__ = "users"
+    id = Column(Integer, primary_key=True, index=True)
+    nickname = Column(String, unique=True, nullable=False)
+    password = Column(String, nullable=True)
+    is_guest = Column(Integer, default=0)
+
+Base.metadata.create_all(bind=engine)
+
+# Pydantic модели
+class RegisterRequest(BaseModel):
+    nickname: str
+    password: str
+
+class LoginRequest(BaseModel):
+    nickname: str
+    password: str
+
+class GuestRequest(BaseModel):
+    nickname: str
+
+# FastAPI приложение
 app = FastAPI()
 
-# подключение к БД
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
+# Глобальный обработчик ошибок
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    print("❌ ERROR:", exc)
+    traceback.print_exc()
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "Internal Server Error", "error": str(exc)},
+    )
 
-@app.on_event("startup")
-def startup_event():
-    init_db()
-
-
-# ✅ Регистрация
 @app.post("/register")
-def register(username: str, password: str, db: Session = Depends(get_db)):
-    if db.query(User).filter(User.username == username).first():
-        raise HTTPException(status_code=400, detail="Username already exists")
-    user = User(username=username, password=password, is_guest=0)
+def register(data: RegisterRequest):
+    db = SessionLocal()
+    if db.query(User).filter_by(nickname=data.nickname).first():
+        raise HTTPException(status_code=400, detail="Ник уже занят")
+    user = User(nickname=data.nickname, password=data.password, is_guest=0)
     db.add(user)
     db.commit()
-    return {"message": "User registered successfully"}
+    return {"message": f"✅ Пользователь {data.nickname} зарегистрирован"}
 
-
-# ✅ Вход
 @app.post("/login")
-def login(username: str, password: str, db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.username == username, User.password == password).first()
+def login(data: LoginRequest):
+    db = SessionLocal()
+    user = db.query(User).filter_by(nickname=data.nickname, password=data.password).first()
     if not user:
-        raise HTTPException(status_code=401, detail="Invalid credentials")
-    return {"message": "Login successful", "username": user.username}
+        raise HTTPException(status_code=401, detail="Неверный логин или пароль")
+    return {"message": f"🔑 Успешный вход: {data.nickname}"}
 
-
-# ✅ Гостевой вход
 @app.post("/guest")
-def guest(username: str, db: Session = Depends(get_db)):
-    guest_name = f"Guest_{username}"
-    user = User(username=guest_name, is_guest=1)
+def guest(data: GuestRequest):
+    db = SessionLocal()
+    nickname = f"Гость ({data.nickname})"
+    if db.query(User).filter_by(nickname=nickname).first():
+        raise HTTPException(status_code=400, detail="Такой гость уже есть")
+    user = User(nickname=nickname, is_guest=1)
     db.add(user)
     db.commit()
-    return {"message": "Guest login successful", "username": guest_name}
-
-
-if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    return {"message": f"👤 Вошёл как гость: {nickname}"}
