@@ -1,49 +1,96 @@
-from fastapi import FastAPI, Depends
-from sqlalchemy.orm import Session
-import models, schemas
-from database import SessionLocal, engine
-from fastapi.middleware.cors import CORSMiddleware
-
-models.Base.metadata.create_all(bind=engine)
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+from database import SessionLocal, init_db
+from models import User, Message
+from datetime import datetime
+import hashlib
 
 app = FastAPI()
 
-# Разрешаем клиенту общаться
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# --- инициализация базы ---
+init_db()
 
-# Подключение к БД
-def get_db():
+# --- запросы ---
+class RegisterRequest(BaseModel):
+    username: str
+    password: str
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+class GuestRequest(BaseModel):
+    username: str
+
+class MessageRequest(BaseModel):
+    username: str
+    message: str
+
+
+def hash_password(password: str) -> str:
+    return hashlib.sha256(password.encode()).hexdigest()
+
+
+@app.post("/register")
+def register_user(req: RegisterRequest):
     db = SessionLocal()
-    try:
-        yield db
-    finally:
+    existing = db.query(User).filter(User.username == req.username).first()
+    if existing:
         db.close()
+        raise HTTPException(status_code=400, detail="User already exists")
 
-@app.post("/register", response_model=schemas.UserOut)
-def register(user: schemas.UserCreate, db: Session = Depends(get_db)):
-    db_user = db.query(models.User).filter(models.User.username == user.username).first()
-    if db_user:
-        return db_user
-    new_user = models.User(username=user.username, password=user.password)
+    new_user = User(username=req.username, password=hash_password(req.password), is_guest=False)
     db.add(new_user)
     db.commit()
-    db.refresh(new_user)
-    return new_user
+    db.close()
+    return {"status": "ok"}
 
-@app.post("/send", response_model=schemas.MessageOut)
-def send_message(msg: schemas.MessageCreate, db: Session = Depends(get_db)):
-    new_msg = models.Message(content=msg.content, owner_id=msg.owner_id)
-    db.add(new_msg)
+
+@app.post("/register_guest")
+def register_guest(req: GuestRequest):
+    db = SessionLocal()
+    guest_name = f"Гость({req.username})"
+
+    # проверим, чтобы ник не был занят
+    existing = db.query(User).filter(User.username == guest_name).first()
+    if existing:
+        db.close()
+        raise HTTPException(status_code=400, detail="Guest name taken")
+
+    new_guest = User(username=guest_name, password="", is_guest=True)
+    db.add(new_guest)
     db.commit()
-    db.refresh(new_msg)
-    return new_msg
+    db.close()
+    return {"status": "ok", "username": guest_name}
 
-@app.get("/messages", response_model=list[schemas.MessageOut])
-def get_messages(db: Session = Depends(get_db)):
-    return db.query(models.Message).all()
+
+@app.post("/login")
+def login(req: LoginRequest):
+    db = SessionLocal()
+    user = db.query(User).filter(User.username == req.username).first()
+    if not user or user.password != hash_password(req.password):
+        db.close()
+        raise HTTPException(status_code=400, detail="Invalid credentials")
+    db.close()
+    return {"status": "ok", "username": user.username}
+
+
+@app.post("/send_message")
+def send_message(req: MessageRequest):
+    db = SessionLocal()
+    msg = Message(username=req.username, message=req.message, timestamp=datetime.utcnow())
+    db.add(msg)
+    db.commit()
+    db.close()
+    return {"status": "ok"}
+
+
+@app.get("/messages")
+def get_messages():
+    db = SessionLocal()
+    msgs = db.query(Message).order_by(Message.timestamp.desc()).limit(30).all()
+    db.close()
+    return [
+        {"username": m.username, "message": m.message, "timestamp": m.timestamp.isoformat()}
+        for m in reversed(msgs)
+    ]
